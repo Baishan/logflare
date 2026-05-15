@@ -310,7 +310,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
     :telemetry.span(
       [:logflare, :ingest, :pipeline, :stream_batch],
       %{source_token: source_token},
-      fn -> execute_bigquery_stream_batch(context, log_events) end
+      # fn -> execute_bigquery_stream_batch(context, log_events) end
+      fn -> Process.sleep(1000)
+       {log_events, %{}}
+    end
     )
   end
 
