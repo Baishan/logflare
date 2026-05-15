@@ -24,7 +24,7 @@ defmodule Logflare.Backends.AdaptorSupervisor do
 
     children =
       [
-        {IngestEventQueue.QueueJanitor, source: source, backend: backend},
+        # {IngestEventQueue.QueueJanitor, source: source, backend: backend},
         {adaptor_module, {source, backend}}
       ]
 
