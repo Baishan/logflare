@@ -123,7 +123,7 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
   def ack({queue, config}, successful, failed) do
     {sid, bid, _pipeline_ref} = queue
 
-    # maybe_requeue_failed({sid, bid}, failed, config)
+    maybe_requeue_failed({sid, bid}, failed, config)
 
     backend_metadata =
       if bid do
@@ -142,10 +142,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
 
       source ->
         for %{data: {id, tid}} <- successful do
-          # case :ets.lookup(tid, id) do
-          #   [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
-          #   [] -> :ok
-          # end
+          case :ets.lookup(tid, id) do
+            [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
+            [] -> :ok
+          end
 
           :ets.delete(tid, id)
         end
@@ -162,15 +162,6 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
       user_id: context.user_id,
       system_source: context.system_source
     )
-
-    # Data is {id, tid} — look up the full event for schema-update side effect only.
-    # The pointer stays in the message so the full LogEvent is not copied between stages.
-    {id, tid} = message.data
-
-    # case :ets.lookup(tid, id) do
-    #   [{^id, _status, log_event}] -> process_data(log_event, context)
-    #   [] -> :ok
-    # end
 
     Message.put_batcher(message, :bq)
   end
@@ -201,13 +192,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
     } do
       source = Sources.Cache.get_by_id(context.source_id)
 
-      # Fetch full LogEvents from ETS — events are still present (marked :ingested)
-      log_events = fetch_events_from_messages(messages)
-                  |> Enum.map(&process_data(&1, context))
-
-
-
       if source && source.bq_storage_write_api do
+        # Storage write API needs full LogEvent structs for the adaptor.
+        log_events = fetch_events_from_messages(messages)
+        maybe_update_schema(log_events, source, context)
         batch_attrs = compute_batch_attrs(log_events, :bq_storage_write)
 
         OpenTelemetry.Tracer.with_span "ingest.bq_insert", %{attributes: batch_attrs} do
@@ -220,11 +208,9 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
           )
         end
       else
-        batch_attrs = compute_batch_attrs(log_events, :bq_streaming_insert)
-
-        OpenTelemetry.Tracer.with_span "ingest.bq_insert", %{attributes: batch_attrs} do
-          stream_batch(context, log_events)
-        end
+        # Streaming insert path: one-pass ETS fetch + serialization.
+        # LogEvents are never accumulated into a list in the batcher heap.
+        stream_batch_from_messages(context, messages, source)
       end
 
       messages
@@ -299,6 +285,8 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
     }
   end
 
+  # Public interface kept for backward compatibility and direct test usage.
+  # The production streaming path goes through stream_batch_from_messages/3 instead.
   def stream_batch(
         %{source_token: source_token, user_id: user_id, system_source: system_source} = context,
         log_events
@@ -313,20 +301,12 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
     :telemetry.span(
       [:logflare, :ingest, :pipeline, :stream_batch],
       %{source_token: source_token},
-       fn -> execute_bigquery_stream_batch(context, log_events) end
+      fn -> execute_bigquery_stream_batch(context, log_events) end
     )
   end
 
   defp execute_bigquery_stream_batch(%{source_token: source_token} = context, log_events) do
-    rows =
-      OpenTelemetry.Tracer.with_span "ingest.bq_serialize", %{
-        attributes: %{insert_method: :bq_streaming_insert}
-      } do
-        OpenTelemetry.Tracer.set_attribute(:input_bytes, :erlang.external_size(log_events))
-        result = le_list_to_bq_rows(log_events)
-        OpenTelemetry.Tracer.set_attribute(:serialized_bytes, :erlang.external_size(result))
-        result
-      end
+    rows = le_list_to_bq_rows(log_events)
 
     # TODO ... Send some errors through the pipeline again. The generic "retry" error specifically.
     # All others send to the rejected list with the message from BigQuery.
@@ -358,11 +338,101 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
               # "The project web-wtc-1537199112807 has not enabled BigQuery."
               disconnect_backend_and_email(source_token, message)
 
-            # Don't disconnect here because sometimes the GCP API doesn't find projects
-            #
-            # "Not found:" <> _tail = message ->
-            #   disconnect_backend_and_email(source_id, message)
-            #   log_events
+            _message ->
+              Logger.warning("Stream batch response error!",
+                tesla_response: GenUtils.get_tesla_error_message(response)
+              )
+          end
+
+        {:error, response} ->
+          OpenTelemetry.Tracer.set_status(:error, inspect(response))
+          Logger.warning("Stream batch unknown error!", tesla_response: inspect(response))
+      end
+    end
+
+    {:ok, %{}}
+  end
+
+  # Optimised production path for the streaming insert. Takes Broadway messages
+  # directly so that LogEvents are never accumulated into an intermediate list.
+  # Each event is fetched from ETS, serialised to a BQ row, and released within
+  # a single reduce iteration — peak batcher-heap cost is O(1) events, not O(n).
+  defp stream_batch_from_messages(
+         %{source_token: source_token, user_id: user_id, system_source: system_source} = context,
+         messages,
+         source
+       ) do
+    Logger.metadata(
+      source_id: source_token,
+      source_token: source_token,
+      user_id: user_id,
+      system_source: system_source
+    )
+
+    :telemetry.span(
+      [:logflare, :ingest, :pipeline, :stream_batch],
+      %{source_token: source_token},
+      fn -> execute_streaming_insert(context, messages, source) end
+    )
+  end
+
+  @spec execute_streaming_insert(map(), [Broadway.Message.t()], Sources.Source.t() | nil) ::
+          {:ok, map()}
+  defp execute_streaming_insert(%{source_token: source_token} = context, messages, source) do
+    # Compute schema-update config once per batch rather than per event.
+    {schema_via, probability} = schema_update_config(source, context)
+
+    # Single pass: ETS fetch → optional schema update → BQ row serialisation.
+    # `log_event` is a local binding that goes out of scope after each iteration;
+    # the accumulator only holds the growing `rows` list and scalar counters.
+    {rows_rev, event_count, batch_bytes} =
+      Enum.reduce(messages, {[], 0, 0}, fn message, {rows_acc, count_acc, bytes_acc} ->
+        case fetch_event(message) do
+          nil ->
+            {rows_acc, count_acc, bytes_acc}
+
+          log_event ->
+            if schema_via != nil and :rand.uniform() <= probability do
+              :ok = Schema.update(schema_via, log_event, source)
+            end
+
+            row = le_to_bq_row(log_event)
+            bytes = :erlang.external_size(log_event.body)
+            {[row | rows_acc], count_acc + 1, bytes_acc + bytes}
+        end
+      end)
+
+    rows = Enum.reverse(rows_rev)
+
+    OpenTelemetry.Tracer.with_span "ingest.bq_api_call", %{
+      attributes: %{
+        insert_method: :bq_streaming_insert,
+        batch_event_count: event_count,
+        batch_bytes: batch_bytes
+      }
+    } do
+      case BigQuery.stream_batch!(context, rows) do
+        {:ok, %GoogleApi.BigQuery.V2.Model.TableDataInsertAllResponse{insertErrors: nil}} ->
+          OpenTelemetry.Tracer.set_attribute(:insert_error_count, 0)
+          :ok
+
+        {:ok, %GoogleApi.BigQuery.V2.Model.TableDataInsertAllResponse{insertErrors: errors}} ->
+          OpenTelemetry.Tracer.set_attribute(:insert_error_count, length(errors))
+          error_string = inspect(errors)
+          OpenTelemetry.Tracer.set_status(:error, error_string)
+          Logger.warning("BigQuery insert errors.", error_string: error_string)
+
+        {:error, %Tesla.Env{} = response} ->
+          message = GenUtils.get_tesla_error_message(response)
+          OpenTelemetry.Tracer.set_status(:error, message)
+
+          case message do
+            "Access Denied: BigQuery BigQuery: Streaming insert is not allowed in the free tier" =
+                message ->
+              disconnect_backend_and_email(source_token, message)
+
+            "The project" <> _tail = message ->
+              disconnect_backend_and_email(source_token, message)
 
             _message ->
               Logger.warning("Stream batch response error!",
@@ -376,7 +446,52 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
       end
     end
 
-    {log_events, %{}}
+    {:ok, %{}}
+  end
+
+  @spec fetch_event(Broadway.Message.t()) :: LE.t() | nil
+  defp fetch_event(%{data: {id, tid}}) do
+    case :ets.lookup(tid, id) do
+      [{^id, _status, log_event}] -> log_event
+      [] -> nil
+    end
+  end
+
+  defp fetch_event(%{data: %LE{} = log_event}), do: log_event
+
+  # Computes schema-update probability and via-tuple once per batch.
+  # Returns {nil, 0.0} when schema updates should be skipped entirely.
+  @spec schema_update_config(Sources.Source.t() | nil, map()) :: {term() | nil, float()}
+  defp schema_update_config(nil, _context), do: {nil, 0.0}
+  defp schema_update_config(%{lock_schema: true}, _context), do: {nil, 0.0}
+
+  defp schema_update_config(source, context) do
+    probability =
+      case PubSubRates.Cache.get_local_rates(source.token) do
+        %{average_rate: avg} when avg > 0 ->
+          min(1.0, max(0.00001, 1.0 / avg))
+
+        _ ->
+          1.0
+      end
+
+    schema_via = Backends.via_source(source, {Schema, Map.get(context, :backend_id)})
+    {schema_via, probability}
+  end
+
+  # Used by the storage-write-API path which materialises log_events up front.
+  @spec maybe_update_schema([LE.t()], Sources.Source.t() | nil, map()) :: :ok
+  defp maybe_update_schema(_log_events, nil, _context), do: :ok
+  defp maybe_update_schema(_log_events, %{lock_schema: true}, _context), do: :ok
+
+  defp maybe_update_schema(log_events, source, context) do
+    {schema_via, probability} = schema_update_config(source, context)
+
+    for log_event <- log_events, :rand.uniform() <= probability do
+      :ok = Schema.update(schema_via, log_event, source)
+    end
+
+    :ok
   end
 
   def process_data(%LE{source_id: source_id} = log_event, context) do
@@ -394,8 +509,6 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
       probability =
         case PubSubRates.Cache.get_local_rates(source.token) do
           %{average_rate: avg} when avg > 0 ->
-            # probability = 1.0 / avg with safety bounds
-            # supports rates up to 100K+/sec: at 100K/sec -> 0.00001 (samples ~1/sec)
             min(1.0, max(0.00001, 1.0 / avg))
 
           _ ->
