@@ -123,7 +123,7 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
   def ack({queue, config}, successful, failed) do
     {sid, bid, _pipeline_ref} = queue
 
-    maybe_requeue_failed({sid, bid}, failed, config)
+    # maybe_requeue_failed({sid, bid}, failed, config)
 
     backend_metadata =
       if bid do
@@ -142,10 +142,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
 
       source ->
         for %{data: {id, tid}} <- successful do
-          case :ets.lookup(tid, id) do
-            [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
-            [] -> :ok
-          end
+          # case :ets.lookup(tid, id) do
+          #   [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
+          #   [] -> :ok
+          # end
 
           :ets.delete(tid, id)
         end
@@ -167,10 +167,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
     # The pointer stays in the message so the full LogEvent is not copied between stages.
     {id, tid} = message.data
 
-    case :ets.lookup(tid, id) do
-      [{^id, _status, log_event}] -> process_data(log_event, context)
-      [] -> :ok
-    end
+    # case :ets.lookup(tid, id) do
+    #   [{^id, _status, log_event}] -> process_data(log_event, context)
+    #   [] -> :ok
+    # end
 
     Message.put_batcher(message, :bq)
   end
@@ -202,7 +202,8 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
       source = Sources.Cache.get_by_id(context.source_id)
 
       # Fetch full LogEvents from ETS — events are still present (marked :ingested)
-      log_events = fetch_events_from_messages(messages)
+      # log_events = fetch_events_from_messages(messages)
+      log_events = []
 
       if source && source.bq_storage_write_api do
         batch_attrs = compute_batch_attrs(log_events, :bq_storage_write)
