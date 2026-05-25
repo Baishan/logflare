@@ -16,6 +16,8 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   alias GoogleApi.BigQuery.V2.Model
   alias Logflare.Backends
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaConsumerPipeline
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline
   alias Logflare.Backends.Backend
   alias Logflare.Backends.DynamicPipeline
   alias Logflare.Backends.Ecto.SqlUtils
@@ -66,39 +68,58 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
       system_source: source.system_source
     )
 
-    children = [
-      {
-        DynamicPipeline,
-        # soft limit before a new pipeline is created
-        name: Backends.via_source(source, Pipeline, backend.id),
-        pipeline: Pipeline,
-        pipeline_args: [
-          source: source,
-          backend: backend,
-          bigquery_project_id: project_id,
-          bigquery_dataset_id: dataset_id
-        ],
-        min_pipelines: 0,
-        max_pipelines: System.schedulers_online(),
-        initial_count: 1,
-        resolve_interval: 2_500,
-        resolve_count: fn state ->
-          source = Sources.refresh_source_metrics_for_ingest(source)
+    pipeline_children =
+      if kafka_enabled?() do
+        ensure_kafka_client_started()
 
-          lens = IngestEventQueue.list_pending_counts({source.id, backend.id})
+        [
+          {KafkaProducerPipeline,
+           [
+             source: source,
+             backend: backend,
+             name: Backends.via_source(source, KafkaProducerPipeline, backend.id)
+           ]}
+        ]
+      else
+        [
+          {
+            DynamicPipeline,
+            # soft limit before a new pipeline is created
+            name: Backends.via_source(source, Pipeline, backend.id),
+            pipeline: Pipeline,
+            pipeline_args: [
+              source: source,
+              backend: backend,
+              bigquery_project_id: project_id,
+              bigquery_dataset_id: dataset_id
+            ],
+            min_pipelines: 0,
+            max_pipelines: System.schedulers_online(),
+            initial_count: 1,
+            resolve_interval: 2_500,
+            resolve_count: fn state ->
+              source = Sources.refresh_source_metrics_for_ingest(source)
 
-          Backends.handle_resolve_count(state, lens, source.metrics.avg)
-        end
-      },
-      {Schema,
-       [
-         plan: plan,
-         source: source,
-         bigquery_project_id: project_id,
-         bigquery_dataset_id: dataset_id,
-         name: Backends.via_source(source, Schema, backend.id)
-       ]}
-    ]
+              lens = IngestEventQueue.list_pending_counts({source.id, backend.id})
+
+              Backends.handle_resolve_count(state, lens, source.metrics.avg)
+            end
+          }
+        ]
+      end
+
+    children =
+      pipeline_children ++
+        [
+          {Schema,
+           [
+             plan: plan,
+             source: source,
+             bigquery_project_id: project_id,
+             bigquery_dataset_id: dataset_id,
+             name: Backends.via_source(source, Schema, backend.id)
+           ]}
+        ]
 
     Supervisor.init(children, strategy: :one_for_one, max_restarts: 10)
   end
@@ -235,6 +256,11 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
          %User{} = user <- Users.Cache.get(user_id) do
       execute_user_query(user, bq_sql, bq_params, build_base_query_opts(user, opts))
     end
+  end
+
+  @spec kafka_enabled?() :: boolean()
+  def kafka_enabled? do
+    Application.get_env(:logflare, :kafka, []) |> Keyword.get(:enabled, false)
   end
 
   @impl Logflare.Backends.Adaptor
@@ -505,6 +531,36 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
 
   defdelegate log_event_to_df_struct(log_event), to: EventUtils
   defdelegate normalize_df_struct_fields(dataframes), to: EventUtils
+
+  @spec ensure_kafka_client_started() :: :ok | {:error, term()}
+  defp ensure_kafka_client_started do
+    kafka_config = Application.get_env(:logflare, :kafka, [])
+    hosts = Keyword.get(kafka_config, :hosts, [{"localhost", 9092}])
+    topic = Keyword.get(kafka_config, :topic, "logflare_bq_events")
+
+    with :ok <- start_brod_client(hosts),
+         :ok <- start_brod_producer(topic) do
+      :ok
+    end
+  end
+
+  @spec start_brod_client([{String.t(), pos_integer()}]) :: :ok | {:error, term()}
+  defp start_brod_client(hosts) do
+    case :brod.start_client(hosts, :logflare_kafka_client, []) do
+      :ok -> :ok
+      {:error, {:already_started, _}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec start_brod_producer(String.t()) :: :ok | {:error, term()}
+  defp start_brod_producer(topic) do
+    case :brod.start_producer(:logflare_kafka_client, topic, []) do
+      :ok -> :ok
+      {:error, :already_started} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   # handles pagination for the IAM api
   defp get_next_page(project_id, page_token) do

@@ -149,8 +149,10 @@ defmodule Logflare.Mixfile do
       {:tesla, "~> 1.6"},
 
       # Concurrency and pipelines
-      {:broadway, github: "Logflare/broadway", branch: "fix/batcher-fullsweep-after"},
+      {:broadway, github: "Logflare/broadway", branch: "fix/batcher-fullsweep-after", override: true},
       {:syn, github: "Logflare/syn"},
+      {:brod, "~> 3.18"},
+      {:broadway_kafka, "~> 0.4"},
 
       # Test
       {:mix_test_watch, "~> 1.0", only: [:dev, :test], runtime: false},

@@ -81,3 +81,9 @@ config :open_api_spex, :cache_adapter, OpenApiSpex.Plug.NoneCache
 
 config :stripity_stripe,
   api_key: "sk_test_thisisaboguskey"
+
+config :logflare, :kafka,
+  enabled: true,
+  hosts: [{"localhost", 9092}],
+  topic: "logflare_bq_events",
+  partitions: 4
