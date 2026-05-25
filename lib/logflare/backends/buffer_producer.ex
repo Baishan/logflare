@@ -17,6 +17,7 @@ defmodule Logflare.Backends.BufferProducer do
 
   @type state :: %{
           consolidated: boolean(),
+          id_passing: boolean(),
           demand: non_neg_integer(),
           source_id: pos_integer() | nil,
           source_token: atom() | nil,
@@ -58,6 +59,7 @@ defmodule Logflare.Backends.BufferProducer do
 
     state = %{
       consolidated: false,
+      id_passing: Keyword.get(opts, :id_passing, false),
       demand: 0,
       source_id: opts[:source_id],
       source_token: source.token,
@@ -238,6 +240,13 @@ defmodule Logflare.Backends.BufferProducer do
     do_pop_key(key, n)
   end
 
+  defp do_fetch(%{id_passing: true, source_id: sid, backend_id: bid} = _state, n) do
+    # In id-passing mode events stay in ETS until ack; always use take (not pop)
+    # so the pipeline can look up the full event in handle_batch via the tid.
+    key = {sid, bid, self()}
+    do_take_key_ids(key, n)
+  end
+
   defp do_fetch(%{source_id: sid, backend_id: bid, source_token: source_token} = _state, n) do
     key = {sid, bid, self()}
 
@@ -268,6 +277,34 @@ defmodule Logflare.Backends.BufferProducer do
         {:ok, _} = IngestEventQueue.mark_ingested(key, events)
 
         events
+    end
+  end
+
+  @spec do_take_key_ids(key :: table_key(), count :: non_neg_integer()) :: [
+          {binary(), :ets.tid()}
+        ]
+  defp do_take_key_ids({sid, bid, _pid} = key, n) do
+    # With id_passing, events remain in ETS as :ingested until acked. Under high
+    # load the running table's total size (pending + in-flight :ingested) can
+    # hit @max_queue_size, causing add_to_table to overflow new arrivals to the
+    # startup table (pid: nil). The existing BufferProducer never re-reads the
+    # startup table after init, so we drain it back on every fetch cycle.
+    IngestEventQueue.move({sid, bid, nil}, key)
+
+    case IngestEventQueue.take_pending_ids(key, n) do
+      {:error, :not_initialized} ->
+        Logger.warning(
+          "IngestEventQueue not initialized, could not fetch events. source_id: #{sid}",
+          backend_id: bid
+        )
+
+        []
+
+      {:ok, [], _tid} ->
+        []
+
+      {:ok, ids, tid} ->
+        Enum.map(ids, fn id -> {id, tid} end)
     end
   end
 

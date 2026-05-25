@@ -8,9 +8,6 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
   alias Broadway.Message
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaSerializer
   alias Logflare.Backends.BufferProducer
-  alias Logflare.Backends.IngestEventQueue
-  alias Logflare.LogEvent, as: LE
-  alias Logflare.Sources
 
   @behaviour Broadway.Acknowledger
 
@@ -37,7 +34,8 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
           {BufferProducer,
            [
              source_id: source.id,
-             backend_id: backend.id
+             backend_id: backend.id,
+             id_passing: true
            ]},
         transformer:
           {__MODULE__, :transform,
@@ -86,10 +84,8 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
   end
 
   @impl Broadway.Acknowledger
-  def ack({queue, config}, successful, failed) do
-    {sid, bid, _} = queue
-
-    maybe_requeue_failed({sid, bid}, failed, config)
+  def ack({_queue, config}, successful, failed) do
+    maybe_requeue_failed(failed, config)
 
     # When max_retries is 0 we drop failed messages without requeue.
     # Still delete them from ETS so they don't stall the queue indefinitely.
@@ -99,16 +95,8 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
         _ -> successful
       end
 
-    case Sources.Cache.get_by_id(sid) do
-      nil ->
-        for %{data: %{is_popped: false} = le} <- to_delete do
-          IngestEventQueue.delete(queue, le)
-        end
-
-      _source ->
-        for %{data: %{is_popped: false} = le} <- to_delete do
-          IngestEventQueue.delete(queue, le)
-        end
+    for %{data: {id, tid}} <- to_delete do
+      :ets.delete(tid, id)
     end
 
     :ok
@@ -121,9 +109,7 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
 
   @impl Broadway
   def handle_batch(:kafka, messages, batch_info, context) do
-    log_events = Enum.map(messages, & &1.data)
-
-    case produce_to_kafka(log_events, context.topic, context.source_token, context.partitions) do
+    case produce_to_kafka(messages, context.topic, context.source_token, context.partitions) do
       :ok ->
         :telemetry.execute(
           [:logflare, :backends, :pipeline, :handle_batch],
@@ -144,22 +130,30 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
     end
   end
 
-  @spec produce_to_kafka([LE.t()], String.t(), atom(), pos_integer()) ::
+  @spec produce_to_kafka([Broadway.Message.t()], String.t(), atom(), pos_integer()) ::
           :ok | {:error, term()}
-  defp produce_to_kafka(log_events, topic, source_token, partitions) do
+  defp produce_to_kafka(messages, topic, source_token, partitions) do
     key = to_string(source_token)
 
-    # Encode all events up front, then split evenly across partitions so that
-    # each produce_sync targets a different partition and all fire concurrently.
-    chunk_size = max(1, ceil(length(log_events) / partitions))
+    # Split messages evenly across partitions and fire each chunk concurrently.
+    # Events are fetched from ETS and encoded one at a time inside each task so
+    # that no full LogEvent list is ever held in memory alongside the encoded form.
+    chunk_size = max(1, ceil(length(messages) / partitions))
 
-    log_events
-    |> Enum.map(fn le -> {key, KafkaSerializer.encode(le)} end)
+    messages
     |> Enum.chunk_every(chunk_size)
     |> Enum.with_index()
     |> Task.async_stream(
       fn {chunk, partition} ->
-        :brod.produce_sync(:logflare_kafka_client, topic, partition, key, chunk)
+        records =
+          Enum.flat_map(chunk, fn %{data: {id, tid}} ->
+            case :ets.lookup(tid, id) do
+              [{^id, _status, log_event}] -> [{key, KafkaSerializer.encode(log_event)}]
+              [] -> []
+            end
+          end)
+
+        :brod.produce_sync(:logflare_kafka_client, topic, partition, key, records)
       end,
       ordered: false,
       timeout: 10_000
@@ -172,18 +166,6 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
     end)
   end
 
-  defp maybe_requeue_failed(_, [], _), do: :ok
-  defp maybe_requeue_failed(_, _, %{max_retries: 0}), do: :ok
-
-  defp maybe_requeue_failed({_sid, _bid} = sid_bid, failed, %{max_retries: max_retries}) do
-    events =
-      failed
-      |> Enum.filter(fn %{data: %LE{retries: retries}} -> retries < max_retries end)
-      |> Enum.map(fn %{data: %LE{} = le} -> %LE{le | retries: (le.retries || 0) + 1} end)
-
-    unless Enum.empty?(events) do
-      IngestEventQueue.delete_batch(sid_bid, events)
-      IngestEventQueue.add_to_table(sid_bid, events)
-    end
-  end
+  defp maybe_requeue_failed([], _config), do: :ok
+  defp maybe_requeue_failed(_failed, %{max_retries: 0}), do: :ok
 end
