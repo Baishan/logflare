@@ -83,8 +83,11 @@ config :stripity_stripe,
   api_key: "sk_test_thisisaboguskey"
 
 config :logflare, :kafka,
-  enabled: true,
+  enabled: false,
   hosts: [{"localhost", 9092}],
   topic: "logflare_bq_events",
   partitions: 4,
-  consumer_enabled: true
+  consumer_enabled: false
+
+config :logflare, :spool_buffer,
+  enabled: true

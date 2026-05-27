@@ -156,6 +156,11 @@ defmodule Logflare.Telemetry do
         measurement: :duration,
         event_name: "bandit.request.stop.duration"
       ),
+      sum("logflare.http.ingest.req_body_bytes",
+        measurement: :req_body_bytes,
+        event_name: [:bandit, :request, :stop],
+        description: "Total ingest bytes received across all HTTP requests"
+      ),
       sum("logflare.logs.processor.ingest.logs.count",
         tags: [:processor],
         description: "Total raw events ingested by processor"

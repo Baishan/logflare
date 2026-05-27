@@ -17,6 +17,7 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   alias Logflare.Backends
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor.SpoolBufferPipeline
   alias Logflare.Backends.Backend
   alias Logflare.Backends.DynamicPipeline
   alias Logflare.Backends.Ecto.SqlUtils
@@ -68,43 +69,55 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
     )
 
     pipeline_children =
-      if kafka_enabled?() do
-        ensure_kafka_client_started()
+      cond do
+        kafka_enabled?() ->
+          ensure_kafka_client_started()
 
-        [
-          {KafkaProducerPipeline,
-           [
-             source: source,
-             backend: backend,
-             name: Backends.via_source(source, KafkaProducerPipeline, backend.id)
-           ]}
-        ]
-      else
-        [
-          {
-            DynamicPipeline,
-            # soft limit before a new pipeline is created
-            name: Backends.via_source(source, Pipeline, backend.id),
-            pipeline: Pipeline,
-            pipeline_args: [
-              source: source,
-              backend: backend,
-              bigquery_project_id: project_id,
-              bigquery_dataset_id: dataset_id
-            ],
-            min_pipelines: 0,
-            max_pipelines: System.schedulers_online(),
-            initial_count: 1,
-            resolve_interval: 2_500,
-            resolve_count: fn state ->
-              source = Sources.refresh_source_metrics_for_ingest(source)
+          [
+            {KafkaProducerPipeline,
+             [
+               source: source,
+               backend: backend,
+               name: Backends.via_source(source, KafkaProducerPipeline, backend.id)
+             ]}
+          ]
 
-              lens = IngestEventQueue.list_pending_counts({source.id, backend.id})
+        spool_buffer_enabled?() ->
+          [
+            {SpoolBufferPipeline,
+             [
+               source: source,
+               backend: backend,
+               name: Backends.via_source(source, SpoolBufferPipeline, backend.id)
+             ]}
+          ]
 
-              Backends.handle_resolve_count(state, lens, source.metrics.avg)
-            end
-          }
-        ]
+        true ->
+          [
+            {
+              DynamicPipeline,
+              # soft limit before a new pipeline is created
+              name: Backends.via_source(source, Pipeline, backend.id),
+              pipeline: Pipeline,
+              pipeline_args: [
+                source: source,
+                backend: backend,
+                bigquery_project_id: project_id,
+                bigquery_dataset_id: dataset_id
+              ],
+              min_pipelines: 0,
+              max_pipelines: System.schedulers_online(),
+              initial_count: 1,
+              resolve_interval: 2_500,
+              resolve_count: fn state ->
+                source = Sources.refresh_source_metrics_for_ingest(source)
+
+                lens = IngestEventQueue.list_pending_counts({source.id, backend.id})
+
+                Backends.handle_resolve_count(state, lens, source.metrics.avg)
+              end
+            }
+          ]
       end
 
     children =
@@ -260,6 +273,11 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   @spec kafka_enabled?() :: boolean()
   def kafka_enabled? do
     Application.get_env(:logflare, :kafka, []) |> Keyword.get(:enabled, false)
+  end
+
+  @spec spool_buffer_enabled?() :: boolean()
+  def spool_buffer_enabled? do
+    Application.get_env(:logflare, :spool_buffer, []) |> Keyword.get(:enabled, false)
   end
 
   @spec kafka_consumer_enabled?() :: boolean()
