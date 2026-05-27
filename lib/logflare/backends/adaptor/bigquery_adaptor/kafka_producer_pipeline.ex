@@ -109,7 +109,13 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
 
   @impl Broadway
   def handle_batch(:kafka, messages, batch_info, context) do
-    case produce_to_kafka(messages, context.topic, context.source_token, context.partitions) do
+    case produce_to_kafka(
+           messages,
+           context.topic,
+           context.source_token,
+           context.partitions,
+           context.backend_id
+         ) do
       :ok ->
         :telemetry.execute(
           [:logflare, :backends, :pipeline, :handle_batch],
@@ -130,9 +136,15 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
     end
   end
 
-  @spec produce_to_kafka([Broadway.Message.t()], String.t(), atom(), pos_integer()) ::
+  @spec produce_to_kafka(
+          [Broadway.Message.t()],
+          String.t(),
+          atom(),
+          pos_integer(),
+          pos_integer() | nil
+        ) ::
           :ok | {:error, term()}
-  defp produce_to_kafka(messages, topic, source_token, partitions) do
+  defp produce_to_kafka(messages, topic, source_token, partitions, backend_id) do
     key = to_string(source_token)
 
     # Split messages evenly across partitions and fire each chunk concurrently.
@@ -148,8 +160,11 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline do
         records =
           Enum.flat_map(chunk, fn %{data: {id, tid}} ->
             case :ets.lookup(tid, id) do
-              [{^id, _status, log_event}] -> [{key, KafkaSerializer.encode(log_event)}]
-              [] -> []
+              [{^id, _status, log_event}] ->
+                [{key, KafkaSerializer.encode(log_event, backend_id)}]
+
+              [] ->
+                []
             end
           end)
 

@@ -7,6 +7,7 @@ defmodule Logflare.Application do
   alias Logflare.Alerting.AlertSchedulerWorker
   alias Logflare.Networking
   alias Logflare.Backends.Adaptor.BigQueryAdaptor
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor.BigQueryKafkaConsumerSup
   alias Logflare.Backends.UserMonitoring
   alias Logflare.ContextCache
   alias Logflare.Logs
@@ -174,7 +175,14 @@ defmodule Logflare.Application do
           ]
       end
 
-    goth ++ config_cat
+    kafka_consumer =
+      if BigQueryAdaptor.kafka_consumer_enabled?() do
+        [BigQueryKafkaConsumerSup]
+      else
+        []
+      end
+
+    goth ++ config_cat ++ kafka_consumer
   end
 
   def config_change(changed, _new, removed) do

@@ -16,7 +16,6 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   alias GoogleApi.BigQuery.V2.Model
   alias Logflare.Backends
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient
-  alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaConsumerPipeline
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline
   alias Logflare.Backends.Backend
   alias Logflare.Backends.DynamicPipeline
@@ -261,6 +260,13 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   @spec kafka_enabled?() :: boolean()
   def kafka_enabled? do
     Application.get_env(:logflare, :kafka, []) |> Keyword.get(:enabled, false)
+  end
+
+  @spec kafka_consumer_enabled?() :: boolean()
+  def kafka_consumer_enabled? do
+    kafka_config = Application.get_env(:logflare, :kafka, [])
+    Keyword.get(kafka_config, :enabled, false) and
+      Keyword.get(kafka_config, :consumer_enabled, true)
   end
 
   @impl Logflare.Backends.Adaptor

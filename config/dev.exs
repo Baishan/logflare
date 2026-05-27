@@ -86,4 +86,5 @@ config :logflare, :kafka,
   enabled: true,
   hosts: [{"localhost", 9092}],
   topic: "logflare_bq_events",
-  partitions: 4
+  partitions: 4,
+  consumer_enabled: true

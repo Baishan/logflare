@@ -3,13 +3,20 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaSerializer do
 
   alias Logflare.LogEvent
 
-  @spec encode(LogEvent.t()) :: binary()
-  def encode(%LogEvent{} = le) do
-    Jason.encode!(%{id: le.id, body: le.body})
+  @spec encode(LogEvent.t(), pos_integer() | nil) :: binary()
+  def encode(%LogEvent{} = le, backend_id) do
+    Jason.encode!(%{
+      id: le.id,
+      body: le.body,
+      source_id: le.source_id,
+      backend_id: backend_id,
+      event_type: le.event_type,
+      ingested_at: le.ingested_at
+    })
   end
 
-  @spec decode(binary()) :: %{String.t() => term()}
+  @spec decode(binary()) :: {:ok, %{String.t() => term()}} | {:error, Jason.DecodeError.t()}
   def decode(binary) do
-    Jason.decode!(binary)
+    Jason.decode(binary)
   end
 end
