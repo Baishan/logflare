@@ -38,7 +38,7 @@ config :logflare, LogflareWeb.Endpoint,
 
 config :logger, :console,
   format: "\n[$level] [$metadata] $message\n",
-  metadata: [:request_id],
+  metadata: :all,
   level: :debug
 
 config :phoenix, :stacktrace_depth, 20
@@ -90,4 +90,22 @@ config :logflare, :kafka,
   consumer_enabled: false
 
 config :logflare, :spool_buffer,
-  enabled: true
+  enabled: false
+
+config :logflare, :s3_pipeline,
+  enabled: true,
+  bucket: "logflare-spool",
+  partitions: 4,
+  batch_timeout: 5_000,
+  upload_mode: :put_object
+
+config :ex_aws,
+  access_key_id: "minioadmin",
+  secret_access_key: "minioadmin",
+  region: "us-east-1",
+  s3: [
+    scheme: "http://",
+    host: "localhost",
+    port: 9002,
+    region: "us-east-1"
+  ]

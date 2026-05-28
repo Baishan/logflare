@@ -8,6 +8,7 @@ defmodule Logflare.Backends.AdaptorSupervisor do
 
   alias Logflare.Backends
   alias Logflare.Backends.Adaptor
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor
   alias Logflare.Backends.IngestEventQueue
 
   def start_link({source, backend} = opts) do
@@ -22,11 +23,14 @@ defmodule Logflare.Backends.AdaptorSupervisor do
     # create the startup queue
     IngestEventQueue.upsert_tid({source.id, backend.id, nil})
 
-    children =
-      [
-        {IngestEventQueue.QueueJanitor, source: source, backend: backend},
-        {adaptor_module, {source, backend}}
-      ]
+    janitor_children =
+      if BigQueryAdaptor.s3_pipeline_enabled?() do
+        []
+      else
+        [{IngestEventQueue.QueueJanitor, source: source, backend: backend}]
+      end
+
+    children = janitor_children ++ [{adaptor_module, {source, backend}}]
 
     Supervisor.init(children, strategy: :one_for_one)
   end

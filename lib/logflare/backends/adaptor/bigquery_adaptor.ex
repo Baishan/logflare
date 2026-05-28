@@ -17,6 +17,7 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   alias Logflare.Backends
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.KafkaProducerPipeline
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor.S3Pipeline
   alias Logflare.Backends.Adaptor.BigQueryAdaptor.SpoolBufferPipeline
   alias Logflare.Backends.Backend
   alias Logflare.Backends.DynamicPipeline
@@ -79,6 +80,16 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
                source: source,
                backend: backend,
                name: Backends.via_source(source, KafkaProducerPipeline, backend.id)
+             ]}
+          ]
+
+        s3_pipeline_enabled?() ->
+          [
+            {S3Pipeline,
+             [
+               source: source,
+               backend: backend,
+               name: Backends.via_source(source, S3Pipeline, backend.id)
              ]}
           ]
 
@@ -273,6 +284,11 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
   @spec kafka_enabled?() :: boolean()
   def kafka_enabled? do
     Application.get_env(:logflare, :kafka, []) |> Keyword.get(:enabled, false)
+  end
+
+  @spec s3_pipeline_enabled?() :: boolean()
+  def s3_pipeline_enabled? do
+    Application.get_env(:logflare, :s3_pipeline, []) |> Keyword.get(:enabled, false)
   end
 
   @spec spool_buffer_enabled?() :: boolean()
