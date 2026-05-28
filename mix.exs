@@ -154,6 +154,11 @@ defmodule Logflare.Mixfile do
       {:brod, "~> 3.18"},
       {:broadway_kafka, "~> 0.4"},
 
+      # S3
+      {:ex_aws, "~> 2.5"},
+      {:ex_aws_s3, "~> 2.5"},
+      {:sweet_xml, "~> 0.7"},
+
       # Test
       {:mix_test_watch, "~> 1.0", only: [:dev, :test], runtime: false},
       {:phoenix_test, "~> 0.9.1", only: :test, runtime: false},
