@@ -141,13 +141,19 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
         end
 
       source ->
+        metrics = Sources.get_source_metrics_for_ingest(source.token)
+
         for %{data: {id, tid}} <- successful do
           case :ets.lookup(tid, id) do
             [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
             [] -> :ok
           end
 
-          :ets.delete(tid, id)
+          if metrics.avg > 100 do
+            :ets.delete(tid, id)
+          else
+            :ets.update_element(tid, id, {2, :ingested})
+          end
         end
     end
 

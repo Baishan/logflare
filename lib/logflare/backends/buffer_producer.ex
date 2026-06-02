@@ -29,7 +29,7 @@ defmodule Logflare.Backends.BufferProducer do
   @type table_key :: {pos_integer() | atom(), pos_integer() | nil, pid() | nil}
 
   @default_interval 1_000
-  @max_avg_before_pop 9_999_999
+  @max_avg_before_pop 100
 
   def start_link(opts) when is_list(opts) do
     GenStage.start_link(__MODULE__, opts)
