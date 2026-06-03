@@ -123,7 +123,7 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
   def ack({queue, config}, successful, failed) do
     {sid, bid, _pipeline_ref} = queue
 
-    # maybe_requeue_failed({sid, bid}, failed, config)
+    maybe_requeue_failed({sid, bid}, failed, config)
 
     backend_metadata =
       if bid do
@@ -479,21 +479,29 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
 
   # Requeue failed events if the number of previous retries is less than @max_retries
   defp maybe_requeue_failed(_, [], _), do: :ok
-  defp maybe_requeue_failed(_, _, %{max_retries: 0}), do: :ok
+
+  defp maybe_requeue_failed(_, failed, %{max_retries: 0}) do
+    for %{data: {id, tid}} <- failed, do: :ets.delete(tid, id)
+    :ok
+  end
 
   defp maybe_requeue_failed({_sid, _bid} = sid_bid, failed, %{max_retries: max_retries}) do
-    events =
+    to_requeue =
       Enum.flat_map(failed, fn %{data: {id, tid}} ->
         case :ets.lookup(tid, id) do
           [{^id, _status, %LE{retries: retries} = le}] when retries < max_retries ->
             [%LE{le | retries: (retries || 0) + 1}]
 
-          _ ->
+          [{^id, _status, _le}] ->
+            :ets.delete(tid, id)
+            []
+
+          [] ->
             []
         end
       end)
 
-    requeue(sid_bid, events)
+    requeue(sid_bid, to_requeue)
   end
 
   defp requeue(_, []), do: :ok
