@@ -505,7 +505,7 @@ defmodule Logflare.Backends.IngestEventQueue do
          size when is_integer(size) <- :ets.info(tid, :size),
          {taken_ids, _cont} <- :ets.select(tid, ms, min(n, max(size, 1))) do
       for id <- taken_ids do
-        :ets.update_element(tid, id, {2, :ingested})
+        :ets.update_element(tid, id, {2, :processing})
       end
 
       {:ok, taken_ids, tid}
