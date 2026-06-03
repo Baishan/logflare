@@ -142,10 +142,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
 
       source ->
         for %{data: {id, tid}} <- successful do
-          # case :ets.lookup(tid, id) do
-          #   [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
-          #   [] -> :ok
-          # end
+          case :ets.lookup(tid, id) do
+            [{^id, _status, le}] -> emit_event_telemetry(queue, source, le, backend_metadata)
+            [] -> :ok
+          end
 
           :ets.delete(tid, id)
         end
@@ -167,10 +167,10 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
     # The pointer stays in the message so the full LogEvent is not copied between stages.
     {id, tid} = message.data
 
-    # case :ets.lookup(tid, id) do
-    #   [{^id, _status, log_event}] -> process_data(log_event, context)
-    #   [] -> :ok
-    # end
+    case :ets.lookup(tid, id) do
+      [{^id, _status, log_event}] -> process_data(log_event, context)
+      [] -> :ok
+    end
 
     Message.put_batcher(message, :bq)
   end
