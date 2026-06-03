@@ -149,7 +149,7 @@ defmodule Logflare.Sources.Source.BigQuery.Pipeline do
             [] -> :ok
           end
 
-          if metrics.avg > 100 do
+          if true || metrics.avg > 100 do
             :ets.delete(tid, id)
           else
             :ets.update_element(tid, id, {2, :ingested})
