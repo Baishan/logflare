@@ -9,4 +9,14 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.ArrowIPC do
   # When your NIF is loaded, it will override this function.
   # compression must be one of: :zstd, :lz4, :none
   def get_ipc_bytes(_data_frame_json, _compression), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec get_ipc_bytes_from_rows([map()]) :: {binary(), [binary()]}
+  def get_ipc_bytes_from_rows(rows) do
+    compression = Application.get_env(:logflare, :arrow_ipc_compression, :zstd)
+    get_ipc_bytes_from_rows(rows, compression)
+  end
+
+  # When your NIF is loaded, it will override this function.
+  # compression must be one of: :zstd, :lz4, :none
+  def get_ipc_bytes_from_rows(_rows, _compression), do: :erlang.nif_error(:nif_not_loaded)
 end

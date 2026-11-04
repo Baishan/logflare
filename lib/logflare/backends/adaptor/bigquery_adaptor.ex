@@ -127,12 +127,7 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
       } do
         OpenTelemetry.Tracer.set_attribute(:input_bytes, :erlang.external_size(log_events))
 
-        arrow_data =
-          log_events
-          |> Enum.map(&log_event_to_df_struct(&1))
-          |> normalize_df_struct_fields()
-          |> GoogleApiClient.encode_ndjson()
-          |> GoogleApiClient.encode_arrow_data()
+        arrow_data = serialize_to_arrow(log_events)
 
         OpenTelemetry.Tracer.set_attribute(
           :serialized_bytes,
@@ -154,6 +149,28 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor do
           :ok
       end
     end
+  end
+
+  @spec serialize_to_arrow([Logflare.LogEvent.t()]) :: [
+          Google.Cloud.Bigquery.Storage.V1.AppendRowsRequest.ArrowData.t()
+        ]
+  defp serialize_to_arrow(log_events) do
+    if direct_arrow_encoding_enabled?() do
+      log_events
+      |> Enum.map(& &1.body)
+      |> GoogleApiClient.encode_arrow_data_from_rows()
+    else
+      log_events
+      |> Enum.map(&log_event_to_df_struct(&1))
+      |> normalize_df_struct_fields()
+      |> GoogleApiClient.encode_ndjson()
+      |> GoogleApiClient.encode_arrow_data()
+    end
+  end
+
+  @spec direct_arrow_encoding_enabled? :: boolean()
+  defp direct_arrow_encoding_enabled? do
+    Application.get_env(:logflare, :bq_direct_arrow_encoding, false)
   end
 
   @spec format_table_name(atom) :: String.t()

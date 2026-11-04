@@ -24,16 +24,29 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient do
     end
   end
 
+  @spec encode_arrow_data(binary()) :: [ArrowData.t()]
   def encode_arrow_data(ndjson) do
+    wrap_arrow_ipc_bytes(fn -> ArrowIPC.get_ipc_bytes(ndjson) end)
+  end
+
+  @doc """
+  Encodes raw log event bodies directly to Arrow IPC, bypassing NDJSON.
+  """
+  @spec encode_arrow_data_from_rows([map()]) :: [ArrowData.t()]
+  def encode_arrow_data_from_rows(rows) do
+    wrap_arrow_ipc_bytes(fn -> ArrowIPC.get_ipc_bytes_from_rows(rows) end)
+  end
+
+  defp wrap_arrow_ipc_bytes(get_ipc_bytes_fn) do
     {arrow_schema, batch_msgs} =
       OpenTelemetry.Tracer.with_span "ingest.bq_ipc_encode" do
-        {_schema, msgs} = r = ArrowIPC.get_ipc_bytes(ndjson)
+        {_schema, msgs} = r = get_ipc_bytes_fn.()
         OpenTelemetry.Tracer.set_attribute(:ipc_batch_count, length(msgs))
         r
       end
 
     if length(batch_msgs) > 1 do
-      Logger.warning("Storage Write ArrowIPC.get_ipc_bytes produced more than one batch message")
+      Logger.warning("Storage Write ArrowIPC produced more than one batch message")
     end
 
     writer_schema = %Google.Cloud.Bigquery.Storage.V1.ArrowSchema{serialized_schema: arrow_schema}

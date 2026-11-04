@@ -7,8 +7,11 @@ use arrow::{
         CompressionType,
     },
     json::{reader::infer_json_schema, ReaderBuilder},
+    record_batch::RecordBatch,
 };
 use rustler::{Atom, Binary, Env, Error, NewBinary, NifResult, OwnedBinary};
+
+mod arrow_from_terms;
 
 rustler::atoms! {
     zstd,
@@ -32,6 +35,51 @@ fn build_write_options(compression: Option<CompressionType>) -> IpcWriteOptions 
     IpcWriteOptions::default()
         .try_with_compression(compression)
         .unwrap()
+}
+
+pub(crate) fn timestamp_field() -> Field {
+    Field::new(
+        "timestamp",
+        DataType::Timestamp(TimeUnit::Microsecond, Some("+00".into())),
+        false,
+    )
+}
+
+pub(crate) struct EncodedBatch {
+    pub(crate) schema: Vec<u8>,
+    pub(crate) batches: Vec<Vec<u8>>,
+}
+
+pub(crate) fn write_ipc(
+    schema: &Schema,
+    batch: &RecordBatch,
+    write_options: &IpcWriteOptions,
+) -> Result<EncodedBatch, String> {
+    let data_gen = IpcDataGenerator::default();
+
+    let schema_bytes = {
+        let mut tracker = DictionaryTracker::new(false);
+        let schema_data =
+            data_gen.schema_to_bytes_with_dictionary_tracker(schema, &mut tracker, write_options);
+        let mut out = Vec::new();
+        write_message(&mut out, schema_data, write_options).map_err(|e| e.to_string())?;
+        out
+    };
+
+    let batch_bytes = {
+        let mut tracker = DictionaryTracker::new(false);
+        let (_, encoded) = data_gen
+            .encoded_batch(batch, &mut tracker, write_options)
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        write_message(&mut out, encoded, write_options).map_err(|e| e.to_string())?;
+        out
+    };
+
+    Ok(EncodedBatch {
+        schema: schema_bytes,
+        batches: vec![batch_bytes],
+    })
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
