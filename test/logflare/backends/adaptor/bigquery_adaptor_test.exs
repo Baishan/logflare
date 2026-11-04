@@ -5,8 +5,10 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptorTest do
   import Ecto.Query
 
   alias GoogleApi.BigQuery.V2.Api.Jobs, as: BqJobs
+  alias Google.Cloud.Bigquery.Storage.V1.AppendRowsRequest.ArrowData
   alias Logflare.Backends.Backend
   alias Logflare.Backends.Adaptor.BigQueryAdaptor
+  alias Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient
   alias Logflare.Backends.Adaptor.QueryResult
   alias Logflare.Backends.QueryError
 
@@ -553,6 +555,48 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptorTest do
       config = %{project_id: "my-project", dataset_id: "my_dataset"}
 
       assert config == BigQueryAdaptor.sanitize_config_for_display(config)
+    end
+  end
+
+  describe "insert_log_events_via_storage_write_api/2" do
+    setup do
+      on_exit(fn -> Application.delete_env(:logflare, :bq_direct_arrow_encoding) end)
+      :ok
+    end
+
+    defp call_insert(log_event) do
+      test_pid = self()
+
+      GoogleApiClient
+      |> expect(:append_rows, fn {:arrow, arrow_data}, _context, _table ->
+        send(test_pid, {:arrow_data, arrow_data})
+        :ok
+      end)
+
+      BigQueryAdaptor.insert_log_events_via_storage_write_api([log_event],
+        project_id: "my-project",
+        dataset_id: "my_dataset",
+        source_token: :"test-source",
+        source_id: 1,
+        backend_id: 1
+      )
+
+      assert_received {:arrow_data, arrow_data}
+      arrow_data
+    end
+
+    test "encodes via the legacy ndjson path by default" do
+      log_event = build(:log_event, event_message: "hello")
+
+      assert [%ArrowData{}] = call_insert(log_event)
+    end
+
+    test "encodes directly from the raw row when bq_direct_arrow_encoding is enabled" do
+      Application.put_env(:logflare, :bq_direct_arrow_encoding, true)
+
+      log_event = build(:log_event, event_message: "hello")
+
+      assert [%ArrowData{}] = call_insert(log_event)
     end
   end
 end
