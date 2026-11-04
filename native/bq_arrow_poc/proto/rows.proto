@@ -1,0 +1,56 @@
+syntax = "proto3";
+package logflare.poc;
+
+// Fixed-shape stand-in for a log event's nested `metadata` map, flattened to
+// top-level fields for this spike. Real metadata is dynamic/arbitrary, which
+// is exactly why today's path falls back to JSON + schema inference; a
+// production version of this approach needs either one `.proto` per known
+// log shape, or a generic typed Value/Struct message with corresponding
+// generic (but still text-free) Arrow-building code. Out of scope here: this
+// spike only tests whether avoiding text parsing is faster and correct for a
+// single, known schema.
+message UserInfo {
+  int64 id = 1;
+  string plan = 2;
+}
+
+message LogRow {
+  int64 timestamp_us = 1;
+  string event_message = 2;
+  string request_id = 3;
+  UserInfo user = 4;
+  repeated string tags = 5;
+}
+
+message LogRows {
+  repeated LogRow rows = 1;
+}
+
+// Generic, dynamic-metadata variant: tests the actually-hard case the fixed
+// `LogRow` above sidesteps — rows whose metadata keys and types vary, which
+// is what real Logflare traffic looks like. `Value` covers flat scalar
+// metadata only (no nested struct-of-struct); one level of recursion is
+// enough to prove the approach on heterogeneous keys/types without building
+// a fully general arbitrary-depth converter.
+message Value {
+  oneof kind {
+    string string_value = 1;
+    double number_value = 2;
+    bool bool_value = 3;
+    StringList list_value = 4;
+  }
+}
+
+message StringList {
+  repeated string values = 1;
+}
+
+message LogRowDynamic {
+  int64 timestamp_us = 1;
+  string event_message = 2;
+  map<string, Value> metadata = 3;
+}
+
+message LogRowsDynamic {
+  repeated LogRowDynamic rows = 1;
+}

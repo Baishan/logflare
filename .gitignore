@@ -57,6 +57,7 @@ gha-creds-*.json
 /node_modules/
 .vscode/
 /native/sqlparser_ex/target/
+/native/bq_arrow_poc/target/
 
 .google.secret.json
 .*.env

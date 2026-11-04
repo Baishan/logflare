@@ -1,0 +1,39 @@
+[package]
+name = "bq_arrow_poc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Spike crate for comparing two ways of producing Arrow IPC bytes for the
+# BigQuery Storage Write API: today's path (Elixir map -> JSON text ->
+# arrowipc_ex's infer_json_schema + ReaderBuilder, i.e. two text parses) vs a
+# candidate path (Elixir map -> protobuf bytes -> typed Arrow builders, zero
+# text parses). Deliberately NOT a member of the root Cargo workspace (see
+# native/arrowipc_ex, native/mapper_ex, native/sqlparser_ex) so it has no
+# effect on `mix compile` or CI until/unless it's promoted out of spike status.
+[workspace]
+
+[lib]
+name = "bq_arrow_poc"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "mock_sidecar"
+
+[dependencies]
+arrow = { version = "56.2.0", features = ["ipc", "json"] }
+prost = "0.13"
+serde_json = "1"
+chrono = "0.4"
+tiny_http = "0.12"
+rustler = "0.37.2"
+
+[build-dependencies]
+prost-build = "0.13"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "encode_comparison"
+harness = false
