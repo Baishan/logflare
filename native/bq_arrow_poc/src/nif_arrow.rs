@@ -13,9 +13,14 @@
 //! `log_event_to_df_struct/1` existed only because Jason needed to
 //! serialize it as text), `event_message`, and everything else as
 //! unconstrained metadata.
+//!
+//! Scope cut, documented rather than silent: a list element that is itself a
+//! struct or another list falls back to a stringified `Utf8` element (same
+//! policy as a type conflict). Lists of scalars (strings, numbers, bools,
+//! mixed) are fully supported.
 
 use crate::{timestamp_field, write_ipc};
-use arrow::array::{ArrayRef, BooleanArray, Float64Array, ListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray};
+use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray};
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use rustler::types::map::MapIterator;
@@ -26,10 +31,24 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq)]
 enum FieldType {
     Utf8,
+    Int64,
     Float64,
     Boolean,
-    StringList,
+    List(Box<FieldType>),
     Struct(Vec<(String, FieldType)>),
+}
+
+/// `nil` is Elixir's explicit null, distinct from a key simply being absent
+/// - but it must be treated identically to "absent" here. Without this
+/// check, a `nil` value gets classified as `Utf8` (it matches none of the
+/// other term-shape checks), which both loses the nullness and - via
+/// `widen` - corrupts the *whole column* to a string the moment any row has
+/// an explicit `nil` for an otherwise-numeric field. Found by testing
+/// against the real baseline, not by inspection.
+fn is_nil(term: Term) -> bool {
+    term.decode::<rustler::Atom>()
+        .map(|a| a == rustler::types::atom::nil())
+        .unwrap_or(false)
 }
 
 fn infer_term_type(term: Term) -> FieldType {
@@ -37,12 +56,22 @@ fn infer_term_type(term: Term) -> FieldType {
         FieldType::Boolean
     } else if term.is_binary() {
         FieldType::Utf8
+    } else if term.decode::<i64>().is_ok() {
+        FieldType::Int64
     } else if term.is_number() {
         FieldType::Float64
     } else if term.is_map() {
         FieldType::Struct(infer_struct_fields(term))
     } else if term.is_list() {
-        FieldType::StringList
+        let elem_type = term
+            .decode::<Vec<Term>>()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| !is_nil(*e))
+            .map(infer_term_type)
+            .reduce(widen)
+            .unwrap_or(FieldType::Utf8);
+        FieldType::List(Box::new(elem_type))
     } else {
         FieldType::Utf8
     }
@@ -53,6 +82,9 @@ fn infer_struct_fields(map: Term) -> Vec<(String, FieldType)> {
     if let Some(iter) = MapIterator::new(map) {
         for (k, v) in iter {
             if let Ok(key) = k.decode::<String>() {
+                if is_nil(v) {
+                    continue;
+                }
                 let t = infer_term_type(v);
                 acc.entry(key)
                     .and_modify(|existing| *existing = widen(existing.clone(), t.clone()))
@@ -67,7 +99,9 @@ fn infer_struct_fields(map: Term) -> Vec<(String, FieldType)> {
 /// policy as `dynamic.rs`. Two structs widen by recursively unioning their
 /// fields rather than collapsing straight to a string, since a struct
 /// conflicting with a struct is just "different optional sub-fields," not a
-/// real type conflict.
+/// real type conflict. A list element that's a struct or another list is
+/// deliberately not given its own recursive widening - it collapses to
+/// `Utf8` like any other conflict, per the scope cut above.
 fn widen(a: FieldType, b: FieldType) -> FieldType {
     match (a, b) {
         (FieldType::Struct(af), FieldType::Struct(bf)) => {
@@ -79,6 +113,12 @@ fn widen(a: FieldType, b: FieldType) -> FieldType {
             }
             FieldType::Struct(map.into_iter().collect())
         }
+        (FieldType::List(ae), FieldType::List(be)) => FieldType::List(Box::new(widen(*ae, *be))),
+        // Int64 + Float64 is a real, common case (e.g. `1` on one row, `1.5`
+        // on another) - numeric widening, not a type conflict.
+        (FieldType::Int64, FieldType::Float64) | (FieldType::Float64, FieldType::Int64) => {
+            FieldType::Float64
+        }
         (a, b) if a == b => a,
         _ => FieldType::Utf8,
     }
@@ -87,9 +127,10 @@ fn widen(a: FieldType, b: FieldType) -> FieldType {
 fn field_data_type(t: &FieldType) -> DataType {
     match t {
         FieldType::Utf8 => DataType::Utf8,
+        FieldType::Int64 => DataType::Int64,
         FieldType::Float64 => DataType::Float64,
         FieldType::Boolean => DataType::Boolean,
-        FieldType::StringList => DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        FieldType::List(elem) => DataType::List(Arc::new(Field::new("item", field_data_type(elem), true))),
         FieldType::Struct(fields) => {
             let struct_fields: Fields = fields
                 .iter()
@@ -114,41 +155,51 @@ fn term_as_string(term: Term) -> String {
     }
 }
 
-/// Builds one Arrow column for `name` across every row, given the union type
-/// already decided for it. `rows` holds each row's metadata as already-
-/// extracted `(key, Term)` pairs so nested terms stay valid for the whole
-/// build (Rustler terms are tied to the NIF call's `Env`).
-fn build_array(rows: &[HashMap<String, Term>], name: &str, t: &FieldType) -> NifResult<ArrayRef> {
+/// Builds one Arrow array from a flat, already-aligned list of optional
+/// terms - either a top-level/nested-struct column (one term per row) or a
+/// list column's flattened elements (one term per element). Recursive: a
+/// `Struct` or `List` field type recurses into this same function one level
+/// down.
+fn build_scalar_array(values: &[Option<Term>], t: &FieldType) -> NifResult<ArrayRef> {
     match t {
         FieldType::Utf8 => {
-            let values: Vec<Option<String>> =
-                rows.iter().map(|r| r.get(name).map(|t| term_as_string(*t))).collect();
-            Ok(Arc::new(StringArray::from(values)))
+            let out: Vec<Option<String>> = values.iter().map(|v| v.map(term_as_string)).collect();
+            Ok(Arc::new(StringArray::from(out)))
+        }
+        FieldType::Int64 => {
+            let out: Vec<Option<i64>> =
+                values.iter().map(|v| v.and_then(|t| t.decode::<i64>().ok())).collect();
+            Ok(Arc::new(Int64Array::from(out)))
         }
         FieldType::Float64 => {
-            let values: Vec<Option<f64>> = rows
+            // A column can widen to Float64 from a mix of Int64 and Float64
+            // values, so a term that only decodes as an integer must still
+            // be accepted here, not read as absent.
+            let out: Vec<Option<f64>> = values
                 .iter()
-                .map(|r| r.get(name).and_then(|t| t.decode::<f64>().ok()))
+                .map(|v| {
+                    v.and_then(|t| {
+                        t.decode::<f64>().ok().or_else(|| t.decode::<i64>().ok().map(|i| i as f64))
+                    })
+                })
                 .collect();
-            Ok(Arc::new(Float64Array::from(values)))
+            Ok(Arc::new(Float64Array::from(out)))
         }
         FieldType::Boolean => {
-            let values: Vec<Option<bool>> = rows
-                .iter()
-                .map(|r| r.get(name).and_then(|t| t.decode::<bool>().ok()))
-                .collect();
-            Ok(Arc::new(BooleanArray::from(values)))
+            let out: Vec<Option<bool>> =
+                values.iter().map(|v| v.and_then(|t| t.decode::<bool>().ok())).collect();
+            Ok(Arc::new(BooleanArray::from(out)))
         }
-        FieldType::StringList => {
-            let mut flat: Vec<String> = Vec::new();
+        FieldType::List(elem_type) => {
+            let mut flat: Vec<Option<Term>> = Vec::new();
             let mut lengths: Vec<usize> = Vec::new();
             let mut present: Vec<bool> = Vec::new();
-            for r in rows {
-                match r.get(name).and_then(|t| t.decode::<Vec<String>>().ok()) {
+            for v in values {
+                match v.and_then(|t| if t.is_list() { t.decode::<Vec<Term>>().ok() } else { None }) {
                     Some(items) => {
                         lengths.push(items.len());
                         present.push(true);
-                        flat.extend(items);
+                        flat.extend(items.into_iter().map(|e| if is_nil(e) { None } else { Some(e) }));
                     }
                     None => {
                         lengths.push(0);
@@ -156,27 +207,25 @@ fn build_array(rows: &[HashMap<String, Term>], name: &str, t: &FieldType) -> Nif
                     }
                 }
             }
+            let child = build_scalar_array(&flat, elem_type)?;
             Ok(Arc::new(ListArray::new(
-                Arc::new(Field::new("item", DataType::Utf8, true)),
+                Arc::new(Field::new("item", field_data_type(elem_type), true)),
                 OffsetBuffer::from_lengths(lengths),
-                Arc::new(StringArray::from(flat)),
+                child,
                 Some(NullBuffer::from(present)),
             )))
         }
         FieldType::Struct(fields) => {
-            // Per row: the nested map's own (key, Term) pairs if present and
-            // actually a map, else nothing - same shape as the top-level
-            // `rows` input, one level down.
-            let mut inner_rows: Vec<HashMap<String, Term>> = Vec::with_capacity(rows.len());
-            let mut present: Vec<bool> = Vec::with_capacity(rows.len());
-            for r in rows {
-                match r.get(name) {
+            let mut inner_values: Vec<HashMap<String, Term>> = Vec::with_capacity(values.len());
+            let mut present: Vec<bool> = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
                     Some(t) if t.is_map() => {
-                        inner_rows.push(extract_fields(*t));
+                        inner_values.push(extract_fields(*t));
                         present.push(true);
                     }
                     _ => {
-                        inner_rows.push(HashMap::new());
+                        inner_values.push(HashMap::new());
                         present.push(false);
                     }
                 }
@@ -188,7 +237,9 @@ fn build_array(rows: &[HashMap<String, Term>], name: &str, t: &FieldType) -> Nif
                 .collect();
             let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(fields.len());
             for (field_name, field_type) in fields {
-                child_arrays.push(build_array(&inner_rows, field_name, field_type)?);
+                let field_values: Vec<Option<Term>> =
+                    inner_values.iter().map(|m| m.get(field_name.as_str()).copied()).collect();
+                child_arrays.push(build_scalar_array(&field_values, field_type)?);
             }
             let struct_array = StructArray::new(struct_fields.clone(), child_arrays, None);
 
@@ -202,12 +253,19 @@ fn build_array(rows: &[HashMap<String, Term>], name: &str, t: &FieldType) -> Nif
     }
 }
 
+fn build_array(rows: &[HashMap<String, Term>], name: &str, t: &FieldType) -> NifResult<ArrayRef> {
+    let values: Vec<Option<Term>> = rows.iter().map(|r| r.get(name).copied()).collect();
+    build_scalar_array(&values, t)
+}
+
 fn extract_fields(map: Term) -> HashMap<String, Term> {
     let mut out = HashMap::new();
     if let Some(iter) = MapIterator::new(map) {
         for (k, v) in iter {
             if let Ok(key) = k.decode::<String>() {
-                out.insert(key, v);
+                if !is_nil(v) {
+                    out.insert(key, v);
+                }
             }
         }
     }

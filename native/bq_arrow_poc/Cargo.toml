@@ -21,7 +21,7 @@ crate-type = ["cdylib", "rlib"]
 name = "mock_sidecar"
 
 [dependencies]
-arrow = { version = "56.2.0", features = ["ipc", "json"] }
+arrow = { version = "56.2.0", features = ["ipc", "json", "chrono-tz"] }
 prost = "0.13"
 serde_json = "1"
 chrono = "0.4"
