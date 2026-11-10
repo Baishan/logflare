@@ -37,6 +37,8 @@ config :logflare, :bigquery_backend_adaptor, managed_service_account_pool_size: 
 
 config :logflare, :bigquery_pipeline, max_retries: 0
 
+config :logflare, :bq_direct_arrow_encoding, false
+
 config :logflare, :clickhouse_backend_adaptor, engine: "MergeTree"
 
 config :logflare, Logflare.Sources.Source.BigQuery.Schema,
