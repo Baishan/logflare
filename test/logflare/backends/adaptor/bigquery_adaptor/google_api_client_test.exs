@@ -61,6 +61,27 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClientTest do
       assert log =~ "bad row"
       refute_received {:sleep, _}
     end
+
+    test "response with both a top-level error and row_errors logs the row_errors detail" do
+      row_error = %{message: "bad row", index: 0}
+      error = {:error, %Google.Rpc.Status{message: "Errors found while processing rows."}}
+
+      expect(GRPC.Stub, :recv, fn _ ->
+        {:ok, [{:ok, %AppendRowsResponse{response: error, row_errors: [row_error]}}]}
+      end)
+
+      result = {:append_result, %AppendRowsResponse.AppendResult{}}
+
+      expect(GRPC.Stub, :recv, fn _ ->
+        {:ok, [{:ok, %AppendRowsResponse{response: result}}]}
+      end)
+
+      assert {:ok, log} = with_log(fn -> call_append_rows() end)
+      assert log =~ "Errors found while processing rows."
+      assert log =~ "bad row"
+      assert_received {:sleep, _}
+      refute_received {:sleep, _}
+    end
   end
 
   describe "Retry when recv returns" do

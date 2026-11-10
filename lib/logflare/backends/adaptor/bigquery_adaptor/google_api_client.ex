@@ -140,21 +140,29 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.GoogleApiClient do
 
         [request | acc]
 
-      {request, {:ok, %AppendRowsResponse{response: {:error, %{message: msg}}}}}, acc ->
+      {request, {:ok, %AppendRowsResponse{response: {:error, %{message: msg}}} = response}},
+      acc ->
         Logger.warning("Storage Write API AppendRows response with error msg - #{inspect(msg)}")
+        log_row_errors(response)
 
         [request | acc]
 
       {_request, {:ok, %AppendRowsResponse{row_errors: []}}}, acc ->
         acc
 
-      {_request, {:ok, %AppendRowsResponse{row_errors: errors}}}, acc when is_list(errors) ->
-        Logger.warning("Storage Write API AppendRows row errors - #{inspect(errors)}")
-        OpenTelemetry.Tracer.set_attribute("row_errors_present", true)
-        # TODO: This will override previous, but most of the time there's only one request
-        OpenTelemetry.Tracer.set_attribute("row_errors_count", length(errors))
+      {_request, {:ok, %AppendRowsResponse{} = response}}, acc ->
+        log_row_errors(response)
         acc
     end)
+  end
+
+  defp log_row_errors(%AppendRowsResponse{row_errors: []}), do: :ok
+
+  defp log_row_errors(%AppendRowsResponse{row_errors: errors}) do
+    Logger.warning("Storage Write API AppendRows row errors - #{inspect(errors)}")
+    OpenTelemetry.Tracer.set_attribute("row_errors_present", true)
+    # TODO: This will override previous, but most of the time there's only one request
+    OpenTelemetry.Tracer.set_attribute("row_errors_count", length(errors))
   end
 
   defp sleep(ms) do
