@@ -67,6 +67,24 @@ defmodule Logflare.Backends.Adaptor.BigQueryAdaptor.ArrowIPCTest do
       assert {_schema, [_batch]} = ArrowIPC.get_ipc_bytes_from_rows(rows)
     end
 
+    test "encodes a nested map field that is absent on some rows (REPEATED RECORD)" do
+      rows = [
+        %{"timestamp" => 1, "event_message" => "a", "logflare_worker" => %{"worker_id" => "x"}},
+        %{"timestamp" => 2, "event_message" => "b"}
+      ]
+
+      assert {_schema, [_batch]} = ArrowIPC.get_ipc_bytes_from_rows(rows)
+    end
+
+    test "encodes a list field that is absent on some rows" do
+      rows = [
+        %{"timestamp" => 1, "event_message" => "a", "tags" => ["api", "v1"]},
+        %{"timestamp" => 2, "event_message" => "b"}
+      ]
+
+      assert {_schema, [_batch]} = ArrowIPC.get_ipc_bytes_from_rows(rows)
+    end
+
     test "raises when a row is missing the required timestamp field" do
       rows = [%{"event_message" => "a"}]
 

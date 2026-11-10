@@ -22,8 +22,11 @@
 //! raises on the same input.
 
 use crate::{build_write_options, timestamp_field, write_ipc, EncodedBatch};
-use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, RecordBatch, StringArray, StructArray, TimestampMicrosecondArray};
-use arrow::buffer::{NullBuffer, OffsetBuffer};
+use arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, RecordBatch, StringArray,
+    StructArray, TimestampMicrosecondArray,
+};
+use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use rustler::types::map::MapIterator;
 use rustler::{Atom, Binary, Env, Error, NifResult, OwnedBinary, Term};
@@ -131,7 +134,9 @@ fn field_data_type(t: &FieldType) -> DataType {
         FieldType::Int64 => DataType::Int64,
         FieldType::Float64 => DataType::Float64,
         FieldType::Boolean => DataType::Boolean,
-        FieldType::List(elem) => DataType::List(Arc::new(Field::new("item", field_data_type(elem), true))),
+        FieldType::List(elem) => {
+            DataType::List(Arc::new(Field::new("item", field_data_type(elem), true)))
+        }
         FieldType::Struct(fields) => {
             let struct_fields: Fields = fields
                 .iter()
@@ -139,7 +144,11 @@ fn field_data_type(t: &FieldType) -> DataType {
                 .collect();
             // Nested map -> BigQuery REPEATED RECORD, i.e. wrapped in a list,
             // mirroring `EventUtils.wrap_body_fields/1`.
-            DataType::List(Arc::new(Field::new("item", DataType::Struct(struct_fields), true)))
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(struct_fields),
+                true,
+            )))
         }
     }
 }
@@ -168,8 +177,10 @@ fn build_scalar_array(values: &[Option<Term>], t: &FieldType) -> NifResult<Array
             Ok(Arc::new(StringArray::from(out)))
         }
         FieldType::Int64 => {
-            let out: Vec<Option<i64>> =
-                values.iter().map(|v| v.and_then(|t| t.decode::<i64>().ok())).collect();
+            let out: Vec<Option<i64>> = values
+                .iter()
+                .map(|v| v.and_then(|t| t.decode::<i64>().ok()))
+                .collect();
             Ok(Arc::new(Int64Array::from(out)))
         }
         FieldType::Float64 => {
@@ -180,31 +191,45 @@ fn build_scalar_array(values: &[Option<Term>], t: &FieldType) -> NifResult<Array
                 .iter()
                 .map(|v| {
                     v.and_then(|t| {
-                        t.decode::<f64>().ok().or_else(|| t.decode::<i64>().ok().map(|i| i as f64))
+                        t.decode::<f64>()
+                            .ok()
+                            .or_else(|| t.decode::<i64>().ok().map(|i| i as f64))
                     })
                 })
                 .collect();
             Ok(Arc::new(Float64Array::from(out)))
         }
         FieldType::Boolean => {
-            let out: Vec<Option<bool>> =
-                values.iter().map(|v| v.and_then(|t| t.decode::<bool>().ok())).collect();
+            let out: Vec<Option<bool>> = values
+                .iter()
+                .map(|v| v.and_then(|t| t.decode::<bool>().ok()))
+                .collect();
             Ok(Arc::new(BooleanArray::from(out)))
         }
+        // BigQuery rejects a null entry in a REPEATED (Arrow List) column -
+        // only a present-but-empty list is valid - so a row with no value for
+        // a list field gets length 0 here, never a null list entry.
         FieldType::List(elem_type) => {
             let mut flat: Vec<Option<Term>> = Vec::new();
             let mut lengths: Vec<usize> = Vec::new();
-            let mut present: Vec<bool> = Vec::new();
             for v in values {
-                match v.and_then(|t| if t.is_list() { t.decode::<Vec<Term>>().ok() } else { None }) {
+                match v.and_then(|t| {
+                    if t.is_list() {
+                        t.decode::<Vec<Term>>().ok()
+                    } else {
+                        None
+                    }
+                }) {
                     Some(items) => {
                         lengths.push(items.len());
-                        present.push(true);
-                        flat.extend(items.into_iter().map(|e| if is_nil(e) { None } else { Some(e) }));
+                        flat.extend(
+                            items
+                                .into_iter()
+                                .map(|e| if is_nil(e) { None } else { Some(e) }),
+                        );
                     }
                     None => {
                         lengths.push(0);
-                        present.push(false);
                     }
                 }
             }
@@ -213,21 +238,21 @@ fn build_scalar_array(values: &[Option<Term>], t: &FieldType) -> NifResult<Array
                 Arc::new(Field::new("item", field_data_type(elem_type), true)),
                 OffsetBuffer::from_lengths(lengths),
                 child,
-                Some(NullBuffer::from(present)),
+                None,
             )))
         }
         FieldType::Struct(fields) => {
             let mut inner_values: Vec<HashMap<String, Term>> = Vec::with_capacity(values.len());
-            let mut present: Vec<bool> = Vec::with_capacity(values.len());
+            let mut lengths: Vec<usize> = Vec::with_capacity(values.len());
             for v in values {
                 match v {
                     Some(t) if t.is_map() => {
                         inner_values.push(extract_fields(*t));
-                        present.push(true);
+                        lengths.push(1);
                     }
                     _ => {
                         inner_values.push(HashMap::new());
-                        present.push(false);
+                        lengths.push(0);
                     }
                 }
             }
@@ -238,17 +263,19 @@ fn build_scalar_array(values: &[Option<Term>], t: &FieldType) -> NifResult<Array
                 .collect();
             let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(fields.len());
             for (field_name, field_type) in fields {
-                let field_values: Vec<Option<Term>> =
-                    inner_values.iter().map(|m| m.get(field_name.as_str()).copied()).collect();
+                let field_values: Vec<Option<Term>> = inner_values
+                    .iter()
+                    .map(|m| m.get(field_name.as_str()).copied())
+                    .collect();
                 child_arrays.push(build_scalar_array(&field_values, field_type)?);
             }
             let struct_array = StructArray::new(struct_fields.clone(), child_arrays, None);
 
             Ok(Arc::new(ListArray::new(
                 Arc::new(Field::new("item", DataType::Struct(struct_fields), true)),
-                OffsetBuffer::from_lengths(present.iter().map(|p| if *p { 1 } else { 0 })),
+                OffsetBuffer::from_lengths(lengths),
                 Arc::new(struct_array),
-                Some(NullBuffer::from(present)),
+                None,
             )))
         }
     }
@@ -316,7 +343,10 @@ fn get_ipc_bytes_from_rows<'a>(
         acc.into_iter().collect::<Vec<_>>()
     };
 
-    let mut schema_fields = vec![timestamp_field(), Field::new("event_message", DataType::Utf8, true)];
+    let mut schema_fields = vec![
+        timestamp_field(),
+        Field::new("event_message", DataType::Utf8, true),
+    ];
     for (name, t) in &field_schema {
         schema_fields.push(Field::new(name, field_data_type(t), true));
     }
